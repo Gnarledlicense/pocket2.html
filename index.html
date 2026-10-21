@@ -333,13 +333,13 @@ footer{text-align:center;font-size:11px;color:var(--muted);margin-top:24px;font-
       <ul>
         <li>Its own completed tasks ÷ its own applicable tasks that day</li>
       </ul>
-      <h3>Peaks (stacked bar)</h3>
+      <h3>Peaks (goal towers)</h3>
       <ul>
-        <li>One bar per point (a day at 1W/1M, a week or month bucket at wider ranges) — a point with nothing logged shows no bar at all</li>
-        <li>Each goal gets a segment stacked on the bar, bottom to top, in goal order</li>
-        <li>Segment height = that goal's own completion % — no streaks, no multipliers, no scaling trick</li>
-        <li>The chart's height is fixed to every goal at 100% stacked together — a bar only fills the chart on a full 100% day, never just because it's the tallest bar currently in view</li>
-        <li>Goal order only sets stacking order (which segment sits at the bottom) — it never changes any score</li>
+        <li>One point per bucket (a day at 1W/1M, a week or month bucket at wider ranges); each goal gets its own small tower, side by side — goals are never merged into one shape</li>
+        <li>Each tile is one real task instance that day, not an abstract percentage — a 3-task goal's tower is visibly bigger than a 1-task goal's</li>
+        <li>Filled tile = done. Faint colored outline = logged that day, task applicable, not done. Dashed grey tile = that day was never logged at all</li>
+        <li>Ghost (never-logged) tiles are compressed and faded rather than drawn one-for-one, so a fully quiet stretch reads as light haze, not a tower that dwarfs the weeks you actually tracked</li>
+        <li>No streaks, no multipliers, no scaling trick — a tile is a tile</li>
       </ul>
       <h3>Emoji goals (like Mood)</h3>
       <ul>
@@ -1105,54 +1105,108 @@ function lightenColor(hex, amt){
   return `rgb(${r},${g},${b})`;
 }
 
-function renderStackedBars(el, points, series){
-  const W = 340, H = 280, PAD_B = 20, PAD_T = 26;
+function hexToRgba(hex, a){
+  const h = hex.replace('#','');
+  const r = parseInt(h.substring(0,2),16), g = parseInt(h.substring(2,4),16), b = parseInt(h.substring(4,6),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+// A simple single-ring tile, lighter weight than layeredTilePath — used
+// for "missed" (faint tint of the goal's own color) and "ghost" (faint
+// dashed grey) tiles, so they read as clearly different from a solid
+// "done" tile without fighting it for attention.
+function outlineTilePath(x, y, w, h, r, strokeColor, fillColor, dashed){
+  const d = roundedRectPath(x, y, w, h, r);
+  const dash = dashed ? ` stroke-dasharray="1.6,1.3"` : '';
+  return `<path d="${d}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="0.9"${dash}></path>`;
+}
+
+// Per-goal, per-point tile counts, straight from the same per-day
+// applicability rules the real score uses (isTaskDueOn, skip handling)
+// — this never invents its own notion of "applicable."
+// done/missed = actual task instances on days that WERE logged.
+// ghost = task instances on days that were never logged at all — the
+// app doesn't know what happened, so it doesn't guess either way.
+function goalTileCounts(goal, isoList, historyMap){
+  let done=0, missed=0, ghost=0;
+  isoList.forEach(iso=>{
+    const historicalGoal = findGoalAsOf(goal.id, iso) || goal;
+    const st = historyMap[iso];
+    if(historicalGoal.type==='emoji'){
+      const val = st && st.emoji ? st.emoji[historicalGoal.id] : null;
+      if(!st || val===null || val===undefined){ ghost += 5; return; }
+      const score = Math.max(0, Math.min(5, Math.round(val)));
+      done += score; missed += (5-score);
+      return;
+    }
+    if(!st){
+      ghost += historicalGoal.tasks.filter(t => isTaskDueOn(t, iso)).length;
+      return;
+    }
+    historicalGoal.tasks.forEach(t=>{
+      if(!isTaskDueOn(t, iso)) return;
+      const v = taskValue(st, t.id);
+      if(v === 'skip') return; // excluded that day, doesn't count either way
+      if(v === true) done++; else missed++;
+    });
+  });
+  return { done, missed, ghost };
+}
+
+// Peaks chart: one small tower per goal per point, side by side rather
+// than merged into a single stacked bar. Each tile is one real task
+// instance — filled = done, faint outline = logged-but-missed, dashed
+// grey = never logged at all. Ghost tiles are compressed/faded rather
+// than drawn 1-for-1, so a fully quiet stretch reads as a light haze,
+// not a tower that dwarfs the weeks you actually tracked.
+function renderGoalTowers(el, points, goals, historyMap){
+  const W = 340, H = 280, PAD_B = 20;
   const n = points.length;
   const pitch = W / n;
-  const barW = Math.max(1, pitch * (n<=10 ? 0.87 : 0.8)); // tighter gap on 1W/1M/6M (≤10 bars)
-  const SEG_GAP = 2.4;    // gap between different goals' regions
-  const CUBE_H = barW * (n<=10 ? 0.32 : 1); // even smaller tiles on 1W/1M/6M — width (barW) untouched
-  const CUBE_GAP = 1.4;   // gap between blocks within a goal's own stack
-  const CUBE_R = 2.3;     // corner radius on each block
+  const groupPad = pitch * (n<=10 ? 0.07 : 0.1);
+  const groupW = Math.max(1, pitch - groupPad*2);
+  const BAR_GAP = Math.max(0.6, groupW * 0.03);
+  const barW = Math.max(1, (groupW - BAR_GAP*(goals.length-1)) / goals.length);
+  const TILE_GAP = 1.1;
+  const TILE_R = Math.min(2, barW/2);
 
-  // Fixed ceiling: every goal at 100%. Not "whatever's tallest on
-  // screen" — that made a single logged day look maxed-out just
-  // because it was the only bar in view. A real 100% day now fills
-  // the chart; a partial day shows exactly as partial as it is.
-  const maxStack = Math.max(1, series.length * 100);
-  // reserve room for the worst case (every goal present) so the
-  // tallest possible stack, gaps included, still fits the chart
-  const reservedGapSpace = Math.max(0, series.length-1) * SEG_GAP;
-  const availableH = Math.max(1, (H-PAD_T) - reservedGapSpace);
-  const yScale = v => availableH * (v / maxStack);
+  // precompute every tower so we can size tiles to the tallest one
+  // actually present, instead of a fixed guess that's wrong half the time
+  const towers = points.map(p =>
+    goals.map(goal => {
+      const {done, missed, ghost} = goalTileCounts(goal, p.isoList, historyMap);
+      const ghostShown = ghost>0 ? Math.min(4, 1+Math.round(Math.log2(ghost))) : 0;
+      return { color: goal.color, done, missed, ghostShown };
+    })
+  );
+  const maxTiles = Math.max(1, ...towers.flat().map(t => t.done+t.missed+t.ghostShown));
+  const TILE_H = Math.min(11, Math.max(2.5, (H - (maxTiles-1)*TILE_GAP) / maxTiles));
 
   let svg = `<svg viewBox="0 0 ${W} ${H+PAD_B}" preserveAspectRatio="none">`;
 
   points.forEach((p,i)=>{
-    const hasData = series.some(s => s.values[i] !== null && s.values[i] !== undefined);
-    if(!hasData) return; // nothing logged that point — no bar at all
-
-    const x = i*pitch + (pitch-barW)/2;
-
-    // which segments are actually present, in stacking order — si
-    // keeps each goal's own gradient id correct regardless of which
-    // subset of goals is present on a given point
-    const present = series
-      .map((s,si)=>({ s, si, v: s.values[i] }))
-      .filter(g => g.v !== null && g.v !== undefined && g.v > 0);
-    if(!present.length) return;
-
-    let cursorY = H;
-    present.forEach((g)=>{
-      const segH = yScale(g.v);
-      const count = Math.max(1, Math.round(segH / (CUBE_H+CUBE_GAP)));
-      const cubeH = (segH - (count-1)*CUBE_GAP) / count;
-      let cubeTop = cursorY - cubeH;
-      for(let c=0; c<count; c++){
-        svg += layeredTilePath(x, cubeTop, barW, cubeH, CUBE_R, g.s.color, getComputedColor('--bg'), '#ffde59');
-        cubeTop -= (cubeH + CUBE_GAP);
+    const groupX = i*pitch + groupPad;
+    towers[i].forEach((t,gi)=>{
+      const total = t.done+t.missed+t.ghostShown;
+      if(!total) return;
+      const x = groupX + gi*(barW+BAR_GAP);
+      let y = H;
+      for(let c=0; c<t.done; c++){
+        y -= TILE_H;
+        svg += layeredTilePath(x, y, barW, TILE_H, TILE_R, t.color, getComputedColor('--bg'), '#ffde59');
+        y -= TILE_GAP;
       }
-      cursorY = cursorY - segH - SEG_GAP;
+      for(let c=0; c<t.missed; c++){
+        y -= TILE_H;
+        svg += outlineTilePath(x, y, barW, TILE_H, TILE_R, hexToRgba(t.color,0.5), hexToRgba(t.color,0.14), false);
+        y -= TILE_GAP;
+      }
+      for(let c=0; c<t.ghostShown; c++){
+        y -= TILE_H;
+        const fade = Math.max(0.08, 0.4 - c*0.09);
+        svg += outlineTilePath(x, y, barW, TILE_H, TILE_R, hexToRgba('#c4b4dc',fade), hexToRgba('#c4b4dc',0.04), true);
+        y -= TILE_GAP;
+      }
     });
   });
 
@@ -1252,23 +1306,6 @@ function buildPointList(range, fullHistory){
   }
 }
 
-// A goal's raw completion % for one bucket — done ÷ applicable
-// tasks, averaged across the bucket's days. No weighting, no
-// momentum. Emoji goals use their own 1–5 scale % instead.
-function goalPointPct(goal, isoList, historyMap){
-  if(!isoList.length) return null;
-  const dayPcts = isoList.map(iso=>{
-    const st = historyMap[iso];
-    if(!st) return null;
-    const historicalGoal = findGoalAsOf(goal.id, iso) || goal;
-    if(historicalGoal.type==='emoji') return emojiGoalPct(historicalGoal, st);
-    const max = goalMaxForDay(historicalGoal, st, iso);
-    return max > 0 ? Math.min(100, goalRawScore(historicalGoal, st, iso)/max*100) : null;
-  }).filter(v=>v!==null);
-  if(!dayPcts.length) return null;
-  return dayPcts.reduce((a,b)=>a+b,0) / dayPcts.length;
-}
-
 async function loadStats(range){
   const fullHistory = await getAllHistory();
   const historyMap = {};
@@ -1285,17 +1322,11 @@ async function loadStats(range){
     return;
   }
 
-  const series = GOALS.map(goal => ({
-    color: goal.color,
-    name: goal.name,
-    values: points.map(p => goalPointPct(goal, p.isoList, historyMap))
-  }));
-
-  series.forEach(s=>{
-    legendEl.insertAdjacentHTML('beforeend', `<span><span class="swatch" style="background:${s.color}"></span>${escapeHtml(s.name)}</span>`);
+  GOALS.forEach(goal=>{
+    legendEl.insertAdjacentHTML('beforeend', `<span><span class="swatch" style="background:${goal.color}"></span>${escapeHtml(goal.name)}</span>`);
   });
 
-  renderStackedBars(document.getElementById('chartRange'), points, series);
+  renderGoalTowers(document.getElementById('chartRange'), points, GOALS, historyMap);
 }
 
 function getComputedColor(varName){
