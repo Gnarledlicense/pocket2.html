@@ -338,7 +338,7 @@ footer{text-align:center;font-size:11px;color:var(--muted);margin-top:24px;font-
         <li>One bar per point (a day at 1W/1M, a week or month bucket at wider ranges) — a point with nothing logged shows no bar at all</li>
         <li>Each goal gets a segment stacked on the bar, bottom to top, in goal order</li>
         <li>Segment height = that goal's own completion % — no streaks, no multipliers, no scaling trick</li>
-        <li>The chart's height auto-scales to whichever point's stack is tallest on screen</li>
+        <li>The chart's height is fixed to every goal at 100% stacked together — a bar only fills the chart on a full 100% day, never just because it's the tallest bar currently in view</li>
         <li>Goal order only sets stacking order (which segment sits at the bottom) — it never changes any score</li>
       </ul>
       <h3>Emoji goals (like Mood)</h3>
@@ -1108,10 +1108,11 @@ function renderStackedBars(el, points, series){
   const CUBE_GAP = 1.4;   // gap between blocks within a goal's own stack
   const CUBE_R = 2.3;     // corner radius on each block
 
-  const stackTotals = points.map((p,i)=>
-    series.reduce((sum,s)=> sum + (s.values[i] || 0), 0)
-  );
-  const maxStack = Math.max(1, ...stackTotals) * 1.05;
+  // Fixed ceiling: every goal at 100%. Not "whatever's tallest on
+  // screen" — that made a single logged day look maxed-out just
+  // because it was the only bar in view. A real 100% day now fills
+  // the chart; a partial day shows exactly as partial as it is.
+  const maxStack = Math.max(1, series.length * 100);
   // reserve room for the worst case (every goal present) so the
   // tallest possible stack, gaps included, still fits the chart
   const reservedGapSpace = Math.max(0, series.length-1) * SEG_GAP;
