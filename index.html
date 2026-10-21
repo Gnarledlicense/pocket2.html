@@ -497,12 +497,18 @@ function defaultGoals(){
 let GOALS = defaultGoals();
 
 async function loadGoals(){
-  // NOTE: this simulation file intentionally does NOT load a saved
-  // goals config — it always uses the current defaultGoals() so that
-  // color/design edits in the code are guaranteed visible on reload,
-  // instead of possibly being masked by a config saved on an earlier
-  // visit. (The real app is meant to persist edits — this is a
-  // preview file, not a stand-in for that behavior.)
+  // Load whatever was saved last (added/renamed/recolored goals,
+  // deleted ones, reordering) — fall back to defaultGoals() only
+  // when nothing has been saved yet (first run).
+  const saved = await safeGet(GOALS_KEY);
+  if(saved && saved.value){
+    try{
+      const parsed = JSON.parse(saved.value);
+      if(Array.isArray(parsed) && parsed.length) GOALS = parsed;
+    }catch(e){
+      console.error('Failed to parse saved goals config, using defaults', e);
+    }
+  }
   // migration: old configs used isMood:true and had no "type" field at all
   let migrated = false;
   GOALS.forEach(g=>{
@@ -1022,6 +1028,7 @@ function setActiveTab(name){
   document.getElementById('pageTitle').textContent =
     name==='Stand' ? "Today's Stand" : name==='Stats' ? 'Peaks' : name==='Goals' ? 'Goals' : 'Settings';
 
+  if(name==='Stand') renderGoalCards();
   if(name==='Stats') loadStats(currentRange);
   if(name==='Goals') renderGoalsEditor();
   if(name==='Settings'){ renderChangeLog(); }
