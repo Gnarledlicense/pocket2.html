@@ -1124,33 +1124,43 @@ function outlineTilePath(x, y, w, h, r, strokeColor, fillColor, dashed){
 // Per-goal, per-point tile counts, straight from the same per-day
 // applicability rules the real score uses (isTaskDueOn, skip handling)
 // — this never invents its own notion of "applicable."
-// done/missed = actual task instances on days that WERE logged.
-// ghost = task instances on days that were never logged at all — the
-// app doesn't know what happened, so it doesn't guess either way.
+//
+// done/missed are a TYPICAL DAY in this bucket — the average across
+// days that were actually logged, rounded to a tile count — not a sum
+// across every day. A 1W bar covers one day; a 1Y bar's point covers
+// a whole month. Summing would make a tracked month pile up dozens of
+// tiles while a tracked day shows 2 or 3, so the same goal would look
+// like a completely different size depending only on which range is
+// open. Averaging keeps every tower on the same "what does a day of
+// this goal look like" scale, bounded by the goal's own task count,
+// at every range.
+// ghost = unlogged DAYS in the bucket (not task instances) — the app
+// doesn't know what happened on those days, so it doesn't guess.
 function goalTileCounts(goal, isoList, historyMap){
-  let done=0, missed=0, ghost=0;
+  let doneSum=0, missedSum=0, loggedDays=0, unloggedDays=0;
   isoList.forEach(iso=>{
     const historicalGoal = findGoalAsOf(goal.id, iso) || goal;
     const st = historyMap[iso];
     if(historicalGoal.type==='emoji'){
       const val = st && st.emoji ? st.emoji[historicalGoal.id] : null;
-      if(!st || val===null || val===undefined){ ghost += 5; return; }
+      if(!st || val===null || val===undefined){ unloggedDays++; return; }
       const score = Math.max(0, Math.min(5, Math.round(val)));
-      done += score; missed += (5-score);
+      doneSum += score; missedSum += (5-score); loggedDays++;
       return;
     }
-    if(!st){
-      ghost += historicalGoal.tasks.filter(t => isTaskDueOn(t, iso)).length;
-      return;
-    }
+    if(!st){ unloggedDays++; return; }
+    let dayDone=0, dayMissed=0;
     historicalGoal.tasks.forEach(t=>{
       if(!isTaskDueOn(t, iso)) return;
       const v = taskValue(st, t.id);
       if(v === 'skip') return; // excluded that day, doesn't count either way
-      if(v === true) done++; else missed++;
+      if(v === true) dayDone++; else dayMissed++;
     });
+    doneSum += dayDone; missedSum += dayMissed; loggedDays++;
   });
-  return { done, missed, ghost };
+  const done = loggedDays ? Math.round(doneSum/loggedDays) : 0;
+  const missed = loggedDays ? Math.round(missedSum/loggedDays) : 0;
+  return { done, missed, unloggedDays };
 }
 
 // Peaks chart: one small tower per goal per point, side by side rather
@@ -1171,16 +1181,19 @@ function renderGoalTowers(el, points, goals, historyMap){
   const TILE_R = Math.min(2, barW/2);
 
   // precompute every tower so we can size tiles to the tallest one
-  // actually present, instead of a fixed guess that's wrong half the time
+  // actually present, instead of a fixed guess that's wrong half the time.
+  // done/missed are already a per-day average (see goalTileCounts), so
+  // this stays small and bounded by each goal's own task count at every
+  // range — no range-specific special-casing needed here.
   const towers = points.map(p =>
     goals.map(goal => {
-      const {done, missed, ghost} = goalTileCounts(goal, p.isoList, historyMap);
-      const ghostShown = ghost>0 ? Math.min(4, 1+Math.round(Math.log2(ghost))) : 0;
+      const {done, missed, unloggedDays} = goalTileCounts(goal, p.isoList, historyMap);
+      const ghostShown = unloggedDays>0 ? Math.min(4, 1+Math.round(Math.log2(unloggedDays+1))) : 0;
       return { color: goal.color, done, missed, ghostShown };
     })
   );
   const maxTiles = Math.max(1, ...towers.flat().map(t => t.done+t.missed+t.ghostShown));
-  const TILE_H = Math.min(11, Math.max(2.5, (H - (maxTiles-1)*TILE_GAP) / maxTiles));
+  const TILE_H = Math.min(13, Math.max(5, (H - (maxTiles-1)*TILE_GAP) / maxTiles));
 
   let svg = `<svg viewBox="0 0 ${W} ${H+PAD_B}" preserveAspectRatio="none">`;
 
